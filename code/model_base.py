@@ -5,9 +5,13 @@
 import os
 import logging
 import pickle
+import time
+from datetime import datetime
+import json
 
 import pandas as pd
 from sklearn import linear_model, model_selection
+from sklearn.metrics import mean_squared_error
 
 from utility import timer
 
@@ -22,14 +26,14 @@ def return_feature(method: int) -> list:
     :return: 特征集合
     """
 
-    source_path = r'D:\study\env\steam\data\source_data\zhengqi_train.txt'
-    source_data = pd.read_table(source_path, sep='\t')
+    test_path = r'D:\study\env\steam\data\source_data\zhengqi_test.txt'
+    test_set = pd.read_table(test_path, sep='\t')
 
     if method == 1:
-        feature = list(source_data.columns)
+        feature = list(test_set.columns)
 
     elif method == 2:
-        feature_full = set(source_data.columns)
+        feature_full = set(test_set.columns)
         drop_feature = {'V02', 'V05', 'V06', 'V09', 'V11', 'V13', 'V14', 'V17',
                         'V19', 'V20', 'V21', 'V22', 'V27', 'V35', 'V37'}
         feature = feature_full - drop_feature
@@ -37,7 +41,7 @@ def return_feature(method: int) -> list:
 
     elif method == 3:
         feature = ['V00', 'V01', 'V08', 'V12', 'V15', 'V16', 'V18', 'V25',
-                   'V29', 'V30', 'V31', 'V33', 'V34', 'V36', 'target']
+                   'V29', 'V30', 'V31', 'V33', 'V34', 'V36']
 
     else:
         raise Exception('method输入错误')
@@ -70,11 +74,11 @@ class ModelManager:
     """
 
     models = {}  # 模型集合
-    param_space = {}  # 模型参数空间集合
+    param_spaces = {}  # 模型参数空间集合
 
-    def add_model(self, name: str, **kwargs):
+    def update_model(self, name: str, **kwargs):
         """
-        给models添加一个元素,根据name生成相应的模型
+        给models添加或修改一个元素,根据name生成相应的模型
 
         :param name: key
         :param kwargs: 初始化模型时的参数
@@ -93,14 +97,11 @@ class ModelManager:
         else:
             raise Exception('name输入错误')
 
-        if name in self.models.keys():
-            raise Exception(f'{name} 已经存在')
-        else:
-            self.models[name] = model
+        self.models[name] = model
 
     def update_param_space(self, name: str, param: dict):
         """
-        给param_space添加或修改一个元素
+        给param_spaces添加或修改一个元素
 
         :param name: key
         :param param: value
@@ -110,7 +111,7 @@ class ModelManager:
         if name not in self.models.keys():
             raise Exception(f'{name} 没有该模型')
         else:
-            self.param_space[name] = param
+            self.param_spaces[name] = param
 
 
 class Manager(FeatureManager, ModelManager):
@@ -119,14 +120,18 @@ class Manager(FeatureManager, ModelManager):
     """
 
     source_train = pd.DataFrame()  # 原始训练集
+    test_set = pd.DataFrame()  # 测试集
     adjust_result = pd.DataFrame()  # 调参结果
     validate_result = pd.DataFrame()  # 验证结果
     test_result = pd.DataFrame()  # 测试结果
 
-    path = r'D:\study\env\steam\data'
-    pickle_path = os.path.join(path, 'steam.pickle')
-    validate_path = os.path.join(path, 'validate_result.xlsx')
-    test_path = os.path.join(path, 'test_result.xlsx')
+    path = r'D:\study\env\steam\data'  # 输出目录
+    pickle_path = os.path.join(path, 'steam.pickle')  # pickle模块输出路径
+    adjust_path = os.path.join(path, 'adjust_result.xlsx')  # 调参结果输出路径
+    validate_path = os.path.join(path, 'validate_result.xlsx')  # 验证结果输出路径
+    test_path = os.path.join(path, 'test_result.xlsx')  # 测试结果输出路径
+
+    test_predict_path = r'D:\study\env\steam\data\predict_result'  # 测试集预测输出目录
 
     def read_source_train(self):
         """
@@ -138,6 +143,226 @@ class Manager(FeatureManager, ModelManager):
         source_path = r'D:\study\env\steam\data\source_data\zhengqi_train.txt'
         self.source_train = pd.read_table(source_path, sep='\t')
 
+    def read_test_set(self):
+        """
+        读测试集赋给test_set
+
+        :return: None
+        """
+
+        test_path = r'D:\study\env\steam\data\source_data\zhengqi_test.txt'
+        self.test_set = pd.read_table(test_path, sep='\t')
+
+    def adjust(self, feature_list, model_list):
+
+        result = pd.DataFrame()
+
+        for feature_name in feature_list:
+
+            feature = self.features[feature_name]
+
+            data = self.source_train[feature]
+            target = self.source_train['target']
+
+            for model_name in model_list:
+
+                LOG.info(f'开始调参 {feature_name} {model_name}')
+
+                model = self.models[model_name]
+                param_space = self.param_spaces[model_name]
+
+                gscv = model_selection.GridSearchCV(
+                    model, param_space, cv=5, n_jobs=None, refit=False)
+                start_time = time.time()
+                gscv.fit(data, target)
+                end_time = time.time()
+
+                run_time = end_time - start_time
+                score = gscv.best_score_
+                param = gscv.best_params_
+                model.set_params(**param)
+
+                model_result = pd.DataFrame(
+                    {
+                        'model_name': model_name,
+                        'feature_name': feature_name,
+                        'model': model,
+                        'score': score,
+                        'run_time': run_time,
+                        'param': json.dumps(param)
+                    },
+                    index=[0]
+                )
+
+                result = result.append(model_result)
+
+        LOG.info('调参结束')
+
+        time_now = datetime.now().strftime('%Y%m%d_%H%M%S')
+        result['update_time'] = time_now
+        adjust_result = self.adjust_result
+
+        if adjust_result.empty:
+            adjust_result = adjust_result.append(result)
+
+        else:
+            if_exist = (adjust_result['model_name'].isin(model_list)) \
+                       & (adjust_result['feature_name'].isin(feature_list))
+
+            if if_exist.sum():
+                exist_index = if_exist[if_exist].index
+                adjust_result = adjust_result.drop(index=exist_index)
+
+            adjust_result = adjust_result.append(result)
+
+        adjust_result.sort_values(['feature_name', 'model_name'], inplace=True)
+        adjust_result.reset_index(drop=True, inplace=True)
+        self.adjust_result = adjust_result
+
+    def return_groups(self):
+        index = self.source_train.index
+        source_train_group = pd.Series([i % 5 for i in index], index=index)
+        groups = {}
+        fold = [0, 1, 2, 3, 4]
+
+        for group in fold:
+            fold_temp = fold.copy()
+            fold_temp.remove(group)
+            train_index = (
+                source_train_group[source_train_group.isin(fold_temp)].index)
+            validation_index = (
+                source_train_group[source_train_group == group].index)
+            groups[group] = {
+                'train': train_index,
+                'validation': validation_index
+            }
+
+        return groups
+
+    def validate(self, feature_list, model_list):
+
+        groups = self.return_groups()
+        adjust_result = self.adjust_result
+
+        for feature_name in feature_list:
+
+            feature = self.features[feature_name]
+
+            data = self.source_train[feature]
+            target = self.source_train['target']
+
+            for model_name in model_list:
+                LOG.info(f'开始验证 {feature_name} {model_name}')
+                result = pd.DataFrame()
+
+                is_model = (
+                        (adjust_result['model_name'] == model_name)
+                        & (adjust_result['feature_name'] == feature_name)
+                )
+                model_index = is_model[is_model].index[0]
+                model = adjust_result.loc[model_index, 'model']
+
+                for group in groups.keys():
+
+                    train = data.loc[groups[group]['train']]
+                    train_target = target[groups[group]['train']]
+                    validation = data.loc[groups[group]['validation']]
+                    validation_target = target[groups[group]['validation']]
+
+                    start_time = time.time()
+                    model.fit(train, train_target)
+                    end_time = time.time()
+
+                    run_time = end_time - start_time
+
+                    train_error = mean_squared_error(
+                        train_target, model.predict(train))
+                    validation_error = mean_squared_error(
+                        validation_target, model.predict(validation))
+
+                    model_result = pd.Series(
+                        [train_error, validation_error, run_time],
+                        index=['train_error', 'validation_error', 'run_time']
+                    )
+                    model_result.name = group
+                    result = result.append(model_result)
+
+                score_train = result['train_error'].mean()
+                score_validation = result['validation_error'].mean()
+                mean_train_time = result['run_time'].mean()
+                param = json.dumps(model.get_params())
+                time_now = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+                result = pd.DataFrame(
+                    {
+                        'name': model_name,
+                        'feature_name': feature_name,
+                        'score_train': score_train,
+                        'score_validation': score_validation,
+                        'mean_train_time': mean_train_time,
+                        'param': param,
+                        'update_time': time_now
+                    },
+                    index=[0]
+                )
+
+                validate_result = self.validate_result
+                validate_result = validate_result.append(result)
+                validate_result.reset_index(drop=True, inplace=True)
+                self.validate_result = validate_result
+
+        LOG.info('验证结束')
+
+    def model_test(self, feature_list, model_list):
+
+        adjust_result = self.adjust_result
+
+        for feature_name in feature_list:
+
+            feature = self.features[feature_name]
+
+            train_set = self.source_train[feature]
+            target = self.source_train['target']
+
+            test_set = self.test_set[feature]
+
+            for model_name in model_list:
+                LOG.info(f'开始测试集预测 {feature_name} {model_name}')
+
+                is_model = (
+                        (adjust_result['model_name'] == model_name)
+                        & (adjust_result['feature_name'] == feature_name)
+                )
+                model_index = is_model[is_model].index[0]
+                model = adjust_result.loc[model_index,'model']
+                model.fit(train_set, target)
+
+                time_now = datetime.now().strftime('%Y%m%d_%H%M%S')
+                param = json.dumps(model.get_params())
+
+                result = pd.DataFrame(
+                    {
+                        'name': model_name,
+                        'feature_name': feature_name,
+                        'score': None,
+                        'param': param,
+                        'update_time': time_now
+                    },
+                    index=[0]
+                )
+
+                test_result = self.test_result
+                test_result = test_result.append(result)
+                test_result.reset_index(drop=True, inplace=True)
+                self.test_result = test_result
+
+                test_predict = pd.Series(model.predict(test_set))
+                name = '+'.join([time_now, model_name, feature_name]) + '.txt'
+                path = os.path.join(self.test_predict_path, name)
+                test_predict.to_csv(path, index=False, header=False)
+
+        LOG.info(f'测试集预测结束')
+
     def write_class_variable(self):
         """
         把类变量存入本地
@@ -148,13 +373,14 @@ class Manager(FeatureManager, ModelManager):
         object_pickle = {
             'features': self.features,
             'models': self.models,
-            'param_space': self.param_space,
+            'param_spaces': self.param_spaces,
             'adjust_result': self.adjust_result
         }
 
         with open(self.pickle_path, 'wb') as f:
             pickle.dump(object_pickle, f)
 
+        self.adjust_result.to_excel(self.adjust_path, index=False)
         self.validate_result.to_excel(self.validate_path, index=False)
         self.test_result.to_excel(self.test_path, index=False)
 
@@ -166,34 +392,16 @@ class Manager(FeatureManager, ModelManager):
         """
 
         self.read_source_train()
+        self.read_test_set()
 
         with open(self.pickle_path, 'rb') as f:
             object_pickle = pickle.load(f)
 
         self.features = object_pickle['features']
         self.models = object_pickle['models']
-        self.param_space = object_pickle['param_space']
+        self.param_spaces = object_pickle['param_spaces']
         self.adjust_result = object_pickle['adjust_result']
 
         self.validate_result = pd.read_excel(self.validate_path)
         self.test_result = pd.read_excel(self.test_path)
 
-    def adjust_param(self, feature_set, model_set):
-        for feature_name in feature_set:
-            for model_name in model_set:
-                feature = self.features[feature_name]
-                model = self.features[model_name]
-                param = self.param_space[model_name]
-
-                data = feature[set(feature.columns) - {'target'}]
-                target = feature['target']
-
-                clf = model_selection.GridSearchCV(model, param, cv=10)
-                clf.fit(data, target)
-
-                result = {'feature': feature_name,
-                          'model': model_name,
-                          'best_score': clf.best_score_,
-                          'best_model': clf.best_estimator_
-
-                          }

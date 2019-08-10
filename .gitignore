@@ -2,3 +2,4 @@
 venv
 log
 *.pyc
+code/.ipynb_checkpoints
