@@ -6,14 +6,15 @@ import os
 import logging
 import pickle
 import time
-from datetime import datetime
 import json
+from multiprocessing import Pool
 
 import pandas as pd
+import sklearn
 from sklearn import linear_model, model_selection
 from sklearn.metrics import mean_squared_error
 
-from utility import timer
+from utility import timer, now
 
 LOG = logging.getLogger('my')
 
@@ -125,11 +126,11 @@ class Manager(FeatureManager, ModelManager):
     validate_result = pd.DataFrame()  # 验证结果
     test_result = pd.DataFrame()  # 测试结果
 
-    path = r'D:\study\env\steam\data'  # 输出目录
-    pickle_path = os.path.join(path, 'steam.pickle')  # pickle模块输出路径
-    adjust_path = os.path.join(path, 'adjust_result.xlsx')  # 调参结果输出路径
-    validate_path = os.path.join(path, 'validate_result.xlsx')  # 验证结果输出路径
-    test_path = os.path.join(path, 'test_result.xlsx')  # 测试结果输出路径
+    out_path = r'D:\study\env\steam\data'  # 输出目录
+    pickle_path = os.path.join(out_path, 'steam.pickle')  # pickle模块输出路径
+    adjust_path = os.path.join(out_path, 'adjust_result.xlsx')  # 调参结果输出路径
+    validate_path = os.path.join(out_path, 'validate_result.xlsx')  # 验证结果输出路径
+    test_path = os.path.join(out_path, 'test_result.xlsx')  # 测试结果输出路径
 
     test_predict_path = r'D:\study\env\steam\data\predict_result'  # 测试集预测输出目录
 
@@ -153,7 +154,14 @@ class Manager(FeatureManager, ModelManager):
         test_path = r'D:\study\env\steam\data\source_data\zhengqi_test.txt'
         self.test_set = pd.read_table(test_path, sep='\t')
 
-    def adjust(self, feature_list, model_list):
+    def adjust(self, feature_list: list, model_list: list):
+        """
+        模型调参
+
+        :param feature_list: 特征集合
+        :param model_list: 模型集合
+        :return: None
+        """
 
         result = pd.DataFrame()
 
@@ -165,7 +173,6 @@ class Manager(FeatureManager, ModelManager):
             target = self.source_train['target']
 
             for model_name in model_list:
-
                 LOG.info(f'开始调参 {feature_name} {model_name}')
 
                 model = self.models[model_name]
@@ -182,24 +189,21 @@ class Manager(FeatureManager, ModelManager):
                 param = gscv.best_params_
                 model.set_params(**param)
 
-                model_result = pd.DataFrame(
-                    {
-                        'model_name': model_name,
-                        'feature_name': feature_name,
-                        'model': model,
-                        'score': score,
-                        'run_time': run_time,
-                        'param': json.dumps(param)
-                    },
-                    index=[0]
-                )
+                model_result = {
+                    'feature_name': feature_name,
+                    'model_name': model_name,
+                    'model': model,
+                    'score': score,
+                    'run_time': run_time,
+                    'param': json.dumps(param)
+                }
 
-                result = result.append(model_result)
+                result = result.append(
+                    model_result, ignore_index=True)[model_result.keys()]
 
         LOG.info('调参结束')
 
-        time_now = datetime.now().strftime('%Y%m%d_%H%M%S')
-        result['update_time'] = time_now
+        result['update_time'] = now()
         adjust_result = self.adjust_result
 
         if adjust_result.empty:
@@ -211,7 +215,7 @@ class Manager(FeatureManager, ModelManager):
 
             if if_exist.sum():
                 exist_index = if_exist[if_exist].index
-                adjust_result = adjust_result.drop(index=exist_index)
+                adjust_result.drop(index=exist_index, inplace=True)
 
             adjust_result = adjust_result.append(result)
 
@@ -219,7 +223,13 @@ class Manager(FeatureManager, ModelManager):
         adjust_result.reset_index(drop=True, inplace=True)
         self.adjust_result = adjust_result
 
-    def return_groups(self):
+    def return_groups(self) -> dict:
+        """
+        返回分组对应的训练集，验证集
+
+        :return: 每组对应的训练集验证集
+        """
+
         index = self.source_train.index
         source_train_group = pd.Series([i % 5 for i in index], index=index)
         groups = {}
@@ -239,10 +249,83 @@ class Manager(FeatureManager, ModelManager):
 
         return groups
 
-    def validate(self, feature_list, model_list):
+    def return_model(self, model_name: str, feature_name: str):
+        """
+        返回模型
+
+        :param model_name: 要查找的模型名
+        :param feature_name: 要查找的特征名
+        :return: 模型名特征名对应的具体模型
+        """
+
+        adjust_result = self.adjust_result
+        is_model = (
+                (adjust_result['model_name'] == model_name)
+                & (adjust_result['feature_name'] == feature_name)
+        )
+        model_index = is_model[is_model].index[0]
+        model = adjust_result.loc[model_index, 'model']
+        return model
+
+    @staticmethod
+    def k_fold_validation(
+            groups: dict,
+            group: int,
+            data: pd.DataFrame,
+            target: pd.Series,
+            model: sklearn.base
+    ) -> dict:
+        """
+        返回每折数据的验证结果
+
+        :param groups: 每组对应的训练集验证集
+        :param group: 组号
+        :param data: 特征数据
+        :param target: 特征数据的真值
+        :param model: 训练的模型
+        :return: 该组对应的验证结果
+        """
+        print('pid:', os.getpid())
+
+        train_index = groups[group]['train']
+        validation_index = groups[group]['validation']
+
+        train = data.loc[train_index]
+        train_target = target[train_index]
+        validation = data.loc[validation_index]
+        validation_target = target[validation_index]
+
+        start_time = time.time()
+        model.fit(train, train_target)
+        end_time = time.time()
+
+        train_predict = model.predict(train)
+        validation_predict = model.predict(validation)
+
+        train_error = mean_squared_error(train_target,
+                                         train_predict)
+        validation_error = mean_squared_error(validation_target,
+                                              validation_predict)
+
+        run_time = end_time - start_time
+
+        model_result = {
+            'train_error': train_error,
+            'validation_error': validation_error,
+            'run_time': run_time
+        }
+        return model_result
+
+    def validate(self, feature_list: list, model_list: list):
+        """
+        模型验证
+
+        :param feature_list: 特征集合
+        :param model_list: 模型集合
+        :return: None
+        """
 
         groups = self.return_groups()
-        adjust_result = self.adjust_result
 
         for feature_name in feature_list:
 
@@ -252,70 +335,51 @@ class Manager(FeatureManager, ModelManager):
             target = self.source_train['target']
 
             for model_name in model_list:
+
                 LOG.info(f'开始验证 {feature_name} {model_name}')
-                result = pd.DataFrame()
+                model = self.return_model(model_name, feature_name)
 
-                is_model = (
-                        (adjust_result['model_name'] == model_name)
-                        & (adjust_result['feature_name'] == feature_name)
-                )
-                model_index = is_model[is_model].index[0]
-                model = adjust_result.loc[model_index, 'model']
-
+                pool = Pool(5)
+                result = []
                 for group in groups.keys():
-
-                    train = data.loc[groups[group]['train']]
-                    train_target = target[groups[group]['train']]
-                    validation = data.loc[groups[group]['validation']]
-                    validation_target = target[groups[group]['validation']]
-
-                    start_time = time.time()
-                    model.fit(train, train_target)
-                    end_time = time.time()
-
-                    run_time = end_time - start_time
-
-                    train_error = mean_squared_error(
-                        train_target, model.predict(train))
-                    validation_error = mean_squared_error(
-                        validation_target, model.predict(validation))
-
-                    model_result = pd.Series(
-                        [train_error, validation_error, run_time],
-                        index=['train_error', 'validation_error', 'run_time']
+                    group_result = pool.apply_async(
+                        self.k_fold_validation,
+                        args=(groups, group, data, target, model)
                     )
-                    model_result.name = group
-                    result = result.append(model_result)
+                    result.append(group_result)
+                pool.close()
+
+                result = [group_result.get() for group_result in result]
+                result = pd.DataFrame(result)
 
                 score_train = result['train_error'].mean()
                 score_validation = result['validation_error'].mean()
                 mean_train_time = result['run_time'].mean()
                 param = json.dumps(model.get_params())
-                time_now = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-                result = pd.DataFrame(
-                    {
-                        'name': model_name,
-                        'feature_name': feature_name,
-                        'score_train': score_train,
-                        'score_validation': score_validation,
-                        'mean_train_time': mean_train_time,
-                        'param': param,
-                        'update_time': time_now
-                    },
-                    index=[0]
-                )
+                result = {
+                    'feature_name': feature_name,
+                    'name': model_name,
+                    'score_train': score_train,
+                    'score_validation': score_validation,
+                    'mean_train_time': mean_train_time,
+                    'param': param,
+                    'update_time': now()
+                }
 
-                validate_result = self.validate_result
-                validate_result = validate_result.append(result)
-                validate_result.reset_index(drop=True, inplace=True)
-                self.validate_result = validate_result
+                self.validate_result = self.validate_result.append(
+                    result, ignore_index=True)[result.keys()]
 
         LOG.info('验证结束')
 
-    def model_test(self, feature_list, model_list):
+    def model_test(self, feature_list: list, model_list: list):
+        """
+        模型测试
 
-        adjust_result = self.adjust_result
+        :param feature_list: 特征集合
+        :param model_list: 模型集合
+        :return: None
+        """
 
         for feature_name in feature_list:
 
@@ -328,33 +392,23 @@ class Manager(FeatureManager, ModelManager):
 
             for model_name in model_list:
                 LOG.info(f'开始测试集预测 {feature_name} {model_name}')
+                model = self.return_model(model_name, feature_name)
 
-                is_model = (
-                        (adjust_result['model_name'] == model_name)
-                        & (adjust_result['feature_name'] == feature_name)
-                )
-                model_index = is_model[is_model].index[0]
-                model = adjust_result.loc[model_index,'model']
                 model.fit(train_set, target)
 
-                time_now = datetime.now().strftime('%Y%m%d_%H%M%S')
+                time_now = now()
                 param = json.dumps(model.get_params())
 
-                result = pd.DataFrame(
-                    {
-                        'name': model_name,
-                        'feature_name': feature_name,
-                        'score': None,
-                        'param': param,
-                        'update_time': time_now
-                    },
-                    index=[0]
-                )
+                result = {
+                    'feature_name': feature_name,
+                    'name': model_name,
+                    'score': None,
+                    'param': param,
+                    'update_time': time_now
+                }
 
-                test_result = self.test_result
-                test_result = test_result.append(result)
-                test_result.reset_index(drop=True, inplace=True)
-                self.test_result = test_result
+                self.test_result = self.test_result.append(
+                    result, ignore_index=True)[result.keys()]
 
                 test_predict = pd.Series(model.predict(test_set))
                 name = '+'.join([time_now, model_name, feature_name]) + '.txt'
@@ -404,4 +458,3 @@ class Manager(FeatureManager, ModelManager):
 
         self.validate_result = pd.read_excel(self.validate_path)
         self.test_result = pd.read_excel(self.test_path)
-

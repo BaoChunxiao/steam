@@ -5,6 +5,7 @@
 import time
 import logging
 from functools import wraps
+from datetime import datetime
 
 LOG = logging.getLogger('my')
 
@@ -19,3 +20,7 @@ def timer(func):
             '%s,%s 运行时间: %d s' % (func.__module__, func.__name__, end - start))
 
     return timer_wrapper
+
+
+def now():
+    return datetime.now().strftime('%Y%m%d_%H%M%S')
