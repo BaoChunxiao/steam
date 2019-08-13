@@ -6,7 +6,7 @@ import logging.config
 
 import numpy as np
 
-from model_base import return_feature, Manager
+from model_main import Manager
 
 logging.config.fileConfig(r'D:\study\env\steam\log.ini')
 
@@ -15,7 +15,7 @@ LOG = logging.getLogger('my')
 
 def add_feature():
     for method in [1, 2, 3]:
-        manager.add_feature(str(method), return_feature(method))
+        manager.add_feature(str(method), manager.return_feature(method))
 
 
 def update_model():
