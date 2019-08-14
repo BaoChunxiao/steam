@@ -6,7 +6,7 @@ import logging
 import time
 import json
 from multiprocessing import Pool
-from typing import List, Dict, Sequence, Any
+from typing import List, Tuple, Dict, Sequence, Any
 
 import pandas as pd
 import numpy as np
@@ -45,7 +45,6 @@ class ModelManager(Feature, Model, Groups, Record, ReadWrite):
             target = self.source_train['target']
 
             for model_name in model_list:
-
                 LOG.info(f'开始调参 {feature_name} {model_name}')
 
                 model = self.models[model_name]
@@ -212,7 +211,6 @@ class ModelManager(Feature, Model, Groups, Record, ReadWrite):
             test_set = self.test_set[feature]
 
             for model_name in model_list:
-
                 LOG.info(f'开始测试集预测 {feature_name} {model_name}')
 
                 model = self.search_model(feature_name, model_name)
@@ -239,6 +237,78 @@ class MergeManager(Feature, Model, Groups, Record, ReadWrite):
     模型融合验证测试管理器
     """
 
+    def k_fold_stacking(
+            self,
+            feature_name: str,
+            model_list: List[str],
+            groups: Dict[int, Dict[str, Sequence]],
+            test_set: pd.DataFrame,
+            stacking_model: str
+    ) -> Tuple[Any, pd.DataFrame, pd.Series, pd.DataFrame]:
+        """
+        应用于stacking的交叉验证
+
+        :param feature_name: 特征名
+        :param model_list: 模型集合
+        :param groups: 每组对应的训练集验证集索引
+        :param test_set: 测试集
+        :param stacking_model: 应用于stacking的模型名
+        :return: 训练好的stacking模型，验证集基模型预测值，验证集真值，测试集基模型预测值
+        """
+
+        feature = self.features[feature_name]
+
+        data = self.source_train[feature]
+        target = self.source_train['target']
+
+        test_set = test_set[feature]
+
+        validation_predict = pd.DataFrame()
+        test_predict = pd.DataFrame()
+
+        for model_name in model_list:
+
+            model = self.search_model(feature_name, model_name)
+            model_validation_predict = pd.Series()
+            model_test_predict = pd.DataFrame()
+
+            for group in groups.keys():
+                train_index = groups[group]['train']
+                validation_index = groups[group]['validation']
+
+                train = data.loc[train_index]
+                train_target = target[train_index]
+                validation = data.loc[validation_index]
+
+                model.fit(train, train_target)
+
+                group_validation_predict = pd.Series(
+                    model.predict(validation),
+                    index=validation.index
+                )
+
+                group_test_predict = pd.Series(
+                    model.predict(test_set),
+                    index=test_set.index
+                )
+
+                model_validation_predict = model_validation_predict.append(
+                    group_validation_predict)
+
+                model_test_predict[group] = group_test_predict
+
+            model_test_mean = model_test_predict.mean(axis='columns')
+
+            validation_predict[model_name] = model_validation_predict
+            test_predict[model_name] = model_test_mean
+
+        validation_target = target[validation_predict.index]
+
+        model = self.search_model(feature_name, stacking_model)
+        model.fit(validation_predict, validation_target)
+
+        return model, validation_predict, validation_target, test_predict
+
     def merge_validate(
             self,
             feature_list: List[str],
@@ -257,7 +327,6 @@ class MergeManager(Feature, Model, Groups, Record, ReadWrite):
         """
 
         groups = self.groups
-        cv_predict = self.cv_predict
 
         for feature_name in feature_list:
 
@@ -272,6 +341,7 @@ class MergeManager(Feature, Model, Groups, Record, ReadWrite):
 
                 if merge_name == 'Mean':
 
+                    cv_predict = self.cv_predict
                     choose = (cv_predict['feature_name'] == feature_name) \
                              & (cv_predict['model_name'].isin(model_list))
                     cv_predict_choose = cv_predict.loc[choose]
@@ -298,84 +368,40 @@ class MergeManager(Feature, Model, Groups, Record, ReadWrite):
 
                 elif merge_name == 'Stacking':
 
-                    stacking_groups = self.stacking_groups
-
                     for group in groups.keys():
+                        inner_groups = self.stacking_groups[group].copy()
 
-                        test_index = stacking_groups[group]['test']
+                        test_index = inner_groups['test']
                         test_set = data.loc[test_index]
                         test_target = target[test_index]
 
-                        inner_fold_groups = list(stacking_groups[group].keys())
-                        inner_fold_groups.remove('test')
-
-                        validation_predict = pd.DataFrame()
-                        test_predict = pd.DataFrame()
+                        del inner_groups['test']
 
                         start_time = time.time()
 
-                        for model_name in model_list:
-                            model = self.search_model(feature_name, model_name)
-                            model_validation_predict = pd.Series()
-                            model_test_predict = pd.DataFrame()
-
-                            for inner_group in inner_fold_groups:
-
-                                train_index = stacking_groups[group][
-                                    inner_group]['train']
-                                validation_index = stacking_groups[group][
-                                    inner_group]['validation']
-
-                                train = data.loc[train_index]
-                                train_target = target[train_index]
-                                validation = data.loc[validation_index]
-
-                                model.fit(train, train_target)
-
-                                group_validation_predict = pd.Series(
-                                    model.predict(validation),
-                                    index=validation_index
-                                )
-
-                                group_test_predict = pd.Series(
-                                    model.predict(test_set),
-                                    index=test_set.index
-                                )
-
-                                model_validation_predict = \
-                                    model_validation_predict.append(
-                                        group_validation_predict)
-
-                                model_test_predict[inner_group] = group_test_predict
-
-                            model_test_mean = model_test_predict.mean(
-                                axis='columns')
-
-                            validation_predict[model_name] = model_validation_predict
-                            test_predict[model_name] = model_test_mean
+                        (model,
+                         validation_predict,
+                         validation_target,
+                         test_predict) = self.k_fold_stacking(
+                            feature_name=feature_name,
+                            model_list=model_list,
+                            groups=inner_groups,
+                            test_set=test_set,
+                            stacking_model=stacking_model
+                        )
 
                         end_time = time.time()
-
-                        validation_predict.sort_index(inplace=True)
-                        validation_target = target[validation_predict.index]
-
-                        test_predict = test_predict.loc[
-                            test_set.index, validation_predict.columns]
-
-                        model = self.search_model(
-                            feature_name, stacking_model)
-                        model.fit(validation_predict, validation_target)
 
                         predict_validation = model.predict(validation_predict)
                         predict_test = model.predict(test_predict)
 
                         train_score = mean_squared_error(predict_validation,
                                                          validation_target)
-                        test_score = mean_squared_error(predict_test,
-                                                        test_target)
+                        validation_score = mean_squared_error(predict_test,
+                                                              test_target)
 
                         result.loc[group, 'train'] = train_score
-                        result.loc[group, 'validation'] = test_score
+                        result.loc[group, 'validation'] = validation_score
                         result.loc[group, 'run_time'] = end_time - start_time
 
                     name = merge_name + '_' + stacking_model
@@ -439,55 +465,17 @@ class MergeManager(Feature, Model, Groups, Record, ReadWrite):
 
                 elif merge_name == 'Stacking':
 
-                    groups = self.groups
-                    validation_predict = pd.DataFrame()
-                    test_predict = pd.DataFrame()
+                    (model,
+                     validation_predict,
+                     validation_target,
+                     test_predict) = self.k_fold_stacking(
+                        feature_name=feature_name,
+                        model_list=model_list,
+                        groups=self.groups,
+                        test_set=test_set,
+                        stacking_model=stacking_model
+                    )
 
-                    for model_name in model_list:
-
-                        model = self.search_model(feature_name, model_name)
-                        model_validation_predict = pd.Series()
-                        model_test_predict = pd.DataFrame()
-
-                        for group in groups.keys():
-
-                            train_index = groups[group]['train']
-                            validation_index = groups[group]['validation']
-
-                            train = data.loc[train_index]
-                            train_target = target[train_index]
-                            validation = data.loc[validation_index]
-
-                            model.fit(train, train_target)
-
-                            group_validation_predict = pd.Series(
-                                model.predict(validation),
-                                index=validation_index
-                            )
-
-                            group_test_predict = pd.Series(
-                                model.predict(test_set),
-                                index=test_set.index
-                            )
-
-                            model_validation_predict = \
-                                model_validation_predict.append(
-                                    group_validation_predict)
-
-                            model_test_predict[group] = group_test_predict
-
-                        model_test_mean = model_test_predict.mean(
-                            axis='columns')
-
-                        validation_predict[model_name] = model_validation_predict
-                        test_predict[model_name] = model_test_mean
-
-                    validation_predict.sort_index(inplace=True)
-                    test_predict = test_predict[validation_predict.columns]
-
-                    model = self.search_model(
-                        feature_name, stacking_model)
-                    model.fit(validation_predict, target)
                     predict = model.predict(test_predict)
 
                     name = merge_name + '_' + stacking_model

@@ -95,25 +95,23 @@ if __name__ == '__main__':
         ['LinearRegression', 'LassoRegression']
     )
 
-    manager.merge_validate(
-        ['2', '3'],
-        ['Stacking'],
-        ['LinearRegression', 'LassoRegression', 'RidgeRegression',
-         'DecisionTreeRegressor', 'GradientBoostingRegressor',
-         'RandomForestRegressor', 'SVR'],
-        'RandomForestRegressor'
-    )
-
     manager.model_test(
         ['2', '3'],
         ['LinearRegression', 'LassoRegression']
     )
 
+    manager.merge_validate(
+        ['2', '3'],
+        ['Stacking'],
+        ['LinearRegression', 'RidgeRegression', 'GradientBoostingRegressor',
+         'RandomForestRegressor', 'SVR'],
+        'SVR'
+    )
+
     manager.merge_test(
         ['2', '3'],
         ['Stacking'],
-        ['LinearRegression', 'LassoRegression', 'RidgeRegression',
-         'DecisionTreeRegressor', 'GradientBoostingRegressor',
+        ['LinearRegression', 'RidgeRegression', 'GradientBoostingRegressor',
          'RandomForestRegressor', 'SVR'],
         'SVR'
     )
