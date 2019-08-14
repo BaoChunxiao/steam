@@ -3,23 +3,17 @@
 """
 
 import os
-import logging
 import pickle
-import time
-import json
-from multiprocessing import Pool
-from typing import List, Dict, Sequence, Optional, Any
+from typing import List, Dict, Sequence
 
 import pandas as pd
-import numpy as np
 import sklearn
-from sklearn import linear_model, tree, ensemble, svm, model_selection
-from sklearn.metrics import mean_squared_error
+from sklearn import linear_model, tree, ensemble, svm
 
-from utility import timer, now
+from utility import now
 
 
-class PublicManager:
+class Public:
     """
     公共对象管理器
     """
@@ -37,6 +31,7 @@ class PublicManager:
 
     groups = {}  # 原始训练集交叉验证分组索引
     cv_predict = pd.DataFrame()  # 模型交叉验证预测值
+    stacking_groups = {}  # 适用于stacking的原始训练集交叉验证分组索引
 
     def search_model(self, feature_name: str, model_name: str) -> sklearn.base:
         """
@@ -57,7 +52,7 @@ class PublicManager:
         return model
 
 
-class FeatureManager(PublicManager):
+class Feature(Public):
     """
     特征管理器
     """
@@ -106,7 +101,7 @@ class FeatureManager(PublicManager):
         self.features[name] = feature
 
 
-class ModelManager(PublicManager):
+class Model(Public):
     """
     模型管理器
     """
@@ -161,7 +156,7 @@ class ModelManager(PublicManager):
             self.param_spaces[name] = param
 
 
-class GroupsManager(PublicManager):
+class Groups(Public):
     """
     原始训练集交叉验证分组管理器
     """
@@ -192,16 +187,73 @@ class GroupsManager(PublicManager):
 
         self.groups = groups
 
+    def create_stacking_groups(self):
+        """
+        确定stacking_groups的值，即确定每组测试集对应的训练集验证集索引
 
-class RecordManager(PublicManager):
+        :return: None
+        """
+
+        groups = self.groups
+        fold_groups = list(groups.keys())
+        stacking_groups = {}
+
+        for group in fold_groups:
+
+            fold = dict()
+            fold['test'] = groups[group]['validation']
+
+            inner_fold_groups = fold_groups.copy()
+            inner_fold_groups.remove(group)
+
+            inner_fold = dict()
+            for inner_group in inner_fold_groups:
+
+                train_groups = inner_fold_groups.copy()
+                train_groups.remove(inner_group)
+
+                train_index = []
+                for train_group in train_groups:
+                    train_index.extend(
+                        groups[train_group]['validation'])
+
+                validation_index = groups[inner_group]['validation']
+
+                inner_fold['train'] = train_index
+                inner_fold['validation'] = validation_index
+
+                fold[inner_group] = inner_fold
+            stacking_groups[group] = fold
+
+        self.stacking_groups = stacking_groups
+
+
+class Record(Public):
     """
     调参验证测试，结果记录管理器
     """
 
     @staticmethod
-    def update_class_result(class_result, result, feature_list, model_list):
+    def update_class_result(
+            class_result: pd.DataFrame,
+            result: pd.DataFrame,
+            feature_list: List[str],
+            model_list: List[str]
+    ):
+        """
+        用result更新class_result
+
+        :param class_result: 需要更新的数据
+        :param result: 用来更新的数据
+        :param feature_list: 特征集合
+        :param model_list: 模型集合
+        :return: None
+        """
+
+        result['update_time'] = now()
+
         if class_result.empty:
-            class_result = class_result.append(result)
+            pass
 
         else:
             if_exist = (class_result['model_name'].isin(model_list)) \
@@ -211,58 +263,67 @@ class RecordManager(PublicManager):
                 exist_index = if_exist[if_exist].index
                 class_result.drop(index=exist_index, inplace=True)
 
-            class_result = class_result.append(result)
-
+        class_result = class_result.append(result, sort=False)
         class_result.sort_values(['feature_name', 'model_name'], inplace=True)
         class_result.reset_index(drop=True, inplace=True)
         return class_result
 
-    def append_validate_result(self,
-                               feature_name: str,
-                               name: str,
-                               score_train: float,
-                               score_validation: float,
-                               mean_train_time: Optional[float],
-                               param: str):
+    def update_adjust_result(
+            self,
+            feature_list: List[str],
+            model_list: List[str],
+            result: pd.DataFrame
+    ):
         """
-        往self.validate_result里添加一条记录
+        更新self.adjust_result
 
-        :param feature_name: 特征名
-        :param name: 模型名或融合名
-        :param score_train: 训练集平均得分
-        :param score_validation: 验证集平均得分
-        :param mean_train_time: 平均训练时长
-        :param param: 模型或融合的参数
+        :param feature_list: 特征列表
+        :param model_list: 模型列表
+        :param result: 更新结果记录
+        :return: None
+        """
+
+        self.adjust_result = self.update_class_result(
+            self.adjust_result, result, feature_list, model_list)
+
+    def update_cv_predict(
+            self,
+            feature_list: List[str],
+            model_list: List[str],
+            result: pd.DataFrame
+    ):
+        """
+        更新self.cv_predict
+
+        :param feature_list: 特征列表
+        :param model_list: 模型列表
+        :param result: 更新结果记录
         :return:
         """
 
-        validate_result = {
-            'feature_name': feature_name,
-            'name': name,
-            'score_train': score_train,
-            'score_validation': score_validation,
-            'mean_train_time': mean_train_time,
-            'param': param,
-            'update_time': now()
-        }
+        self.cv_predict = self.update_class_result(
+            self.cv_predict, result, feature_list, model_list)
+
+    def append_validate_result(self, **kwargs):
+        """
+        往self.validate_result里添加一条记录
+
+        :return: None
+        """
 
         self.validate_result = self.validate_result.append(
-            validate_result, ignore_index=True)[validate_result.keys()]
+            [kwargs], ignore_index=True)
 
-    def append_test_result(self, feature_name, name, param, time_now):
-        result = {
-            'feature_name': feature_name,
-            'name': name,
-            'score': None,
-            'param': param,
-            'update_time': time_now
-        }
+    def append_test_result(self, **kwargs):
+        """
+        往self.test_result里添加一条记录
+        """
 
         self.test_result = self.test_result.append(
-            result, ignore_index=True)[result.keys()]
+            [kwargs], ignore_index=True)
 
 
-class ReadWriteManager(PublicManager):
+class ReadWrite(Public):
     """
     输入输出管理器
     """
@@ -295,11 +356,13 @@ class ReadWriteManager(PublicManager):
         test_path = r'D:\study\env\steam\data\source_data\zhengqi_test.txt'
         self.test_set = pd.read_table(test_path, sep='\t')
 
-    def test_out(self,
-                 predict: Sequence[float],
-                 time_now: str,
-                 name: str,
-                 feature_name: str):
+    def test_out(
+            self,
+            predict: Sequence[float],
+            time_now: str,
+            name: str,
+            feature_name: str
+    ):
         """
         将测试集预测结果写到文件中
 
@@ -328,7 +391,8 @@ class ReadWriteManager(PublicManager):
             'param_spaces': self.param_spaces,
             'adjust_result': self.adjust_result,
             'groups': self.groups,
-            'cv_predict': self.cv_predict
+            'cv_predict': self.cv_predict,
+            'stacking_groups': self.stacking_groups
         }
 
         with open(self.pickle_path, 'wb') as f:
@@ -357,6 +421,7 @@ class ReadWriteManager(PublicManager):
         self.adjust_result = object_pickle['adjust_result']
         self.groups = object_pickle['groups']
         self.cv_predict = object_pickle['cv_predict']
+        self.stacking_groups = object_pickle['stacking_groups']
 
         self.validate_result = pd.read_excel(self.validate_path)
         self.test_result = pd.read_excel(self.test_path)

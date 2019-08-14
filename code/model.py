@@ -79,10 +79,11 @@ if __name__ == '__main__':
     # manager.read_source_train()
     # manager.read_test_set()
     # manager.create_groups()
+    # manager.create_stacking_groups()
 
     manager.adjust(
         ['2', '3'],
-        ['SVR']
+        ['LinearRegression','LassoRegression']
     )
 
     # ['LinearRegression', 'LassoRegression', 'RidgeRegression',
@@ -91,30 +92,30 @@ if __name__ == '__main__':
 
     manager.model_validate(
         ['2', '3'],
-        ['LinearRegression', 'LassoRegression', 'RidgeRegression',
-         'DecisionTreeRegressor', 'GradientBoostingRegressor',
-         'RandomForestRegressor', 'SVR']
+        ['LinearRegression', 'LassoRegression']
     )
 
     manager.merge_validate(
         ['2', '3'],
-        ['Mean'],
+        ['Stacking'],
         ['LinearRegression', 'LassoRegression', 'RidgeRegression',
          'DecisionTreeRegressor', 'GradientBoostingRegressor',
-         'RandomForestRegressor', 'SVR']
+         'RandomForestRegressor', 'SVR'],
+        'RandomForestRegressor'
     )
 
     manager.model_test(
-        ['2'],
-        ['GradientBoostingRegressor']
+        ['2', '3'],
+        ['LinearRegression', 'LassoRegression']
     )
 
     manager.merge_test(
-        ['2'],
-        ['Mean'],
+        ['2', '3'],
+        ['Stacking'],
         ['LinearRegression', 'LassoRegression', 'RidgeRegression',
          'DecisionTreeRegressor', 'GradientBoostingRegressor',
-         'RandomForestRegressor', 'SVR']
+         'RandomForestRegressor', 'SVR'],
+        'SVR'
     )
 
     manager.write_class_variable()
@@ -126,6 +127,7 @@ if __name__ == '__main__':
     print('manager.test_set \n', manager.test_set, '\n')
     print('manager.groups \n', manager.groups, '\n')
     print('manager.cv_predict \n', manager.cv_predict, '\n')
+    print('manager.stacking_groups \n', manager.stacking_groups, '\n')
     print('manager.adjust_result \n', manager.adjust_result, '\n')
     print('manager.validate_result \n', manager.validate_result, '\n')
     print('manager.test_result \n', manager.test_result, '\n')
